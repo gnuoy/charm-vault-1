@@ -583,3 +583,113 @@ class TestHandlers(unit_tests.test_utils.CharmTestCase):
         mock_secrets.publish_ca.assert_called_once_with(
             vault_ca='test-ca'
         )
+
+    @mock.patch.object(handlers.vault_pki, 'get_ca')
+    @mock.patch.object(handlers.vault_pki, 'get_chain')
+    @mock.patch.object(handlers.vault_pki, 'create_server_certificate')
+    @mock.patch.object(handlers, 'vault')
+    def test_create_server_cert(self, _vault, create_server_certificate,
+                                get_chain, get_ca):
+        tls_mock = mock.MagicMock()
+        tls_mock.get_server_requests.return_value = {
+            'keystone_0': {
+                'common_name': 'public.openstack.local',
+                'sans': ['10.0.0.10', 'admin.public.openstack.local']}
+        }
+        _vault.vault_ready_for_clients.return_value = True
+        create_server_certificate.return_value = {
+            'certificate': 'CERT',
+            'private_key': 'KEY'}
+        get_ca.return_value = 'CA'
+        get_chain.return_value = 'CHAIN'
+        handlers.create_server_cert(tls_mock)
+        create_server_certificate.assert_called_once_with(
+            'public.openstack.local',
+            alt_names=['admin.public.openstack.local'],
+            ip_sans=['10.0.0.10'])
+        tls_mock.set_server_cert.assert_called_once_with(
+            'keystone_0',
+            'CERT',
+            'KEY')
+        tls_mock.set_ca.assert_called_once_with('CA')
+        tls_mock.set_chain.assert_called_once_with('CHAIN')
+
+    @mock.patch.object(handlers.vault_pki, 'get_ca')
+    @mock.patch.object(handlers.vault_pki, 'get_chain')
+    @mock.patch.object(handlers.vault_pki, 'create_server_certificate')
+    @mock.patch.object(handlers, 'vault')
+    def test_create_server_cert_batch(self, _vault, create_server_certificate,
+                                      get_chain, get_ca):
+
+        def _certs(cn, ip_sans, alt_names):
+            data = {
+                'admin.openstack.local': {
+                    'certificate': 'ADMINCERT',
+                    'private_key': 'ADMINKEY'},
+                'public.openstack.local': {
+                    'certificate': 'PUBLICCERT',
+                    'private_key': 'PUBLICKEY'},
+                'internal.openstack.local': {
+                    'certificate': 'INTCERT',
+                    'private_key': 'INTKEY'}}
+            return data[cn]
+
+        tls_mock = mock.MagicMock()
+        tls_mock.get_server_requests.return_value = {
+            'keystone_0': {
+                'common_name': 'admin.openstack.local',
+                'sans': ['10.0.0.10', 'flump.openstack.local'],
+                'cert_requests': {
+                    'public.openstack.local': {
+                        'sans': ['10.10.0.10', 'unit_name.openstack.local']},
+                    'internal.openstack.local': {
+                        'sans': ['10.20.0.10']}}}}
+        _vault.vault_ready_for_clients.return_value = True
+        create_server_certificate.side_effect = _certs
+        get_ca.return_value = 'CA'
+        get_chain.return_value = 'CHAIN'
+        create_calls = [
+            mock.call(
+                'admin.openstack.local',
+                alt_names=['flump.openstack.local'],
+                ip_sans=['10.0.0.10']),
+            mock.call(
+                'public.openstack.local',
+                alt_names=['unit_name.openstack.local'],
+                ip_sans=['10.10.0.10']),
+            mock.call(
+                'internal.openstack.local',
+                alt_names=[],
+                ip_sans=['10.20.0.10'])]
+        add_server_calls = [
+            mock.call(
+                'keystone_0',
+                'public.openstack.local',
+                'PUBLICCERT',
+                'PUBLICKEY'),
+            mock.call(
+                'keystone_0',
+                'internal.openstack.local',
+                'INTCERT',
+                'INTKEY')
+        ]
+        handlers.create_server_cert(tls_mock)
+        create_server_certificate.assert_has_calls(
+            create_calls,
+            any_order=True)
+        tls_mock.set_server_cert.assert_called_once_with(
+            'keystone_0',
+            'ADMINCERT',
+            'ADMINKEY')
+        tls_mock.add_server_cert.assert_has_calls(
+            add_server_calls,
+            any_order=True)
+        tls_mock.set_ca.assert_called_once_with('CA')
+        tls_mock.set_chain.assert_called_once_with('CHAIN')
+
+    @mock.patch.object(handlers, 'vault')
+    def test_create_server_cert_vault_not_ready(self, _vault):
+        _vault.vault_ready_for_clients.return_value = False
+        tls_mock = mock.MagicMock()
+        handlers.create_server_cert(tls_mock)
+        self.assertFalse(tls_mock.get_server_requests.called)

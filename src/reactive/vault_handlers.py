@@ -59,6 +59,7 @@ from charms.reactive.flags import (
 from charms.layer import snap
 
 import lib.charm.vault as vault
+import lib.charm.vault_pki as vault_pki
 
 # See https://www.vaultproject.io/docs/configuration/storage/postgresql.html
 
@@ -607,3 +608,58 @@ def _assess_status():
             'Unit is ready '
             '(active: {})'.format(str(not health['standby']).lower())
         )
+
+
+@when('leadership.is_leader')
+@when('certificates.server.cert.requested')
+def create_server_cert(tls):
+    if not vault.vault_ready_for_clients():
+        log('Unable to process new secret backend requests,'
+            ' deferring until vault is fully configured', level=DEBUG)
+        return
+
+    server_requests = tls.get_server_requests()
+    # Iterate over all items in the map.
+    for unit_name, request in server_requests.items():
+        cn = request.get('common_name')
+        sans = request.get('sans')
+        # Process request for a single certificate
+        if cn and sans:
+            ip_sans, alt_names = vault_pki.sort_sans(request.get('sans'))
+            # Create the server certificate based on the info in request.
+            try:
+                bundle = vault_pki.create_server_certificate(
+                    cn,
+                    ip_sans=ip_sans,
+                    alt_names=alt_names)
+            except vault.VaultNotReady:
+                # Cannot continue if vault is not ready
+                return
+            # Set the certificate and key for the unit on the relationship.
+            tls.set_server_cert(
+                unit_name,
+                bundle['certificate'],
+                bundle['private_key'])
+        # Process request for a batch of certificates
+        cert_requests = request.get('cert_requests')
+        if cert_requests:
+            for cn, crequest in cert_requests.items():
+                ip_sans, alt_names = vault_pki.sort_sans(crequest.get('sans'))
+                try:
+                    bundle = vault_pki.create_server_certificate(
+                        cn,
+                        ip_sans=list(ip_sans),
+                        alt_names=list(alt_names))
+                    tls.add_server_cert(
+                        unit_name,
+                        cn,
+                        bundle['certificate'],
+                        bundle['private_key'])
+                except vault.VaultNotReady:
+                    # Cannot continue if vault is not ready
+                    return
+            tls.set_server_multicerts(unit_name)
+        tls.set_ca(vault_pki.get_ca())
+        chain = vault_pki.get_chain()
+        if chain:
+            tls.set_chain(chain)
