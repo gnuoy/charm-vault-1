@@ -56,7 +56,7 @@ def get_ca():
     return hookenv.leader_get('root-ca')
 
 
-def create_server_certificate(cn, ip_sans=None, alt_names=None):
+def get_server_certificate(cn, ip_sans=None, alt_names=None, reissue=False):
     """Create a certificate and key for the given cn inc sans if requested
 
     :param cn: Common name to use for certifcate
@@ -171,6 +171,7 @@ def upload_signed_csr(pem, allowed_domains, allow_subdomains=True,
         enforce_hostnames=enforce_hostnames,
         allow_any_name=allow_any_name,
         max_ttl=max_ttl)
+
 
 def sort_sans(sans):
     """Split SANS into IP sans and name SANS

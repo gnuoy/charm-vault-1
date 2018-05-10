@@ -72,12 +72,17 @@ def upload_signed_csr(*args):
         allow_any_name=action_config.get('allow-any-name'),
         max_ttl=action_config.get('max-ttl'))
 
+
+def reissue_certificates(*args):
+    charms.reactive.set_flag('certificates.reissue.requested')
+
 # Actions to function mapping, to allow for illegal python action names that
 # can map to a python function.
 ACTIONS = {
     "authorize-charm": authorize_charm_action,
     "get-csr": get_intermediate_csrs,
     "upload-signed-csr": upload_signed_csr,
+    "reissue-certificates": reissue_certificates,
 }
 
 

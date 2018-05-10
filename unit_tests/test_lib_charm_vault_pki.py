@@ -40,7 +40,6 @@ class TestLibCharmVaultPKI(unit_tests.test_utils.CharmTestCase):
             description='Charm created PKI backend',
             mount_point='my_backend')
 
-
     @patch.object(vault_pki.vault, 'is_backend_mounted')
     def test_configure_pki_backend_noop(self, is_backend_mounted):
         client_mock = mock.MagicMock()

@@ -44,6 +44,7 @@ from charms.reactive import (
     when,
     when_file_changed,
     when_not,
+    when_any,
 )
 
 from charms.reactive.relations import (
@@ -611,13 +612,15 @@ def _assess_status():
 
 
 @when('leadership.is_leader')
-@when('certificates.server.cert.requested')
-def create_server_cert(tls):
+@when_any('certificates.server.cert.requested',
+          'certificates.reissue.requested')
+def create_server_cert():
     if not vault.vault_ready_for_clients():
         log('Unable to process new secret backend requests,'
             ' deferring until vault is fully configured', level=DEBUG)
         return
-
+    reissue_requested = is_flag_set('certificates.reissue.requested')
+    tls = endpoint_from_flag('certificates.available')
     server_requests = tls.get_server_requests()
     # Iterate over all items in the map.
     for unit_name, request in server_requests.items():
@@ -628,10 +631,11 @@ def create_server_cert(tls):
             ip_sans, alt_names = vault_pki.sort_sans(request.get('sans'))
             # Create the server certificate based on the info in request.
             try:
-                bundle = vault_pki.create_server_certificate(
+                bundle = vault_pki.get_server_certificate(
                     cn,
                     ip_sans=ip_sans,
-                    alt_names=alt_names)
+                    alt_names=alt_names,
+                    reissue=reissue_requested)
             except vault.VaultNotReady:
                 # Cannot continue if vault is not ready
                 return
@@ -646,10 +650,11 @@ def create_server_cert(tls):
             for cn, crequest in cert_requests.items():
                 ip_sans, alt_names = vault_pki.sort_sans(crequest.get('sans'))
                 try:
-                    bundle = vault_pki.create_server_certificate(
+                    bundle = vault_pki.get_server_certificate(
                         cn,
                         ip_sans=list(ip_sans),
-                        alt_names=list(alt_names))
+                        alt_names=list(alt_names),
+                        reissue=reissue_requested)
                     tls.add_server_cert(
                         unit_name,
                         cn,
@@ -663,3 +668,4 @@ def create_server_cert(tls):
         chain = vault_pki.get_chain()
         if chain:
             tls.set_chain(chain)
+    clear_flag('certificates.reissue.requested')
