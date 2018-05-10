@@ -4,6 +4,7 @@ import charmhelpers.core.hookenv as hookenv
 from . import vault
 
 CHARM_PKI_MP = "charm-pki-local"
+CHARM_PKI_ROLE = "local"
 
 
 def configure_pki_backend(client, name, ttl=None):
@@ -25,13 +26,13 @@ def configure_pki_backend(client, name, ttl=None):
             config={'max-lease-ttl': ttl or '87600h'})
 
 
-def is_ca_ready(client, name):
+def is_ca_ready(client, name, role):
     """Check if CA is ready for use
 
     :returns: Whether CA is ready
     :rtype: bool
     """
-    return client.read('charm-pki-local/roles/local') is not None
+    return client.read('{}/roles/{}'.format(name, role)) is not None
 
 
 def get_chain(name=None):
@@ -70,7 +71,7 @@ def create_server_certificate(cn, ip_sans=None, alt_names=None):
     """
     client = vault.get_local_client()
     configure_pki_backend(client, CHARM_PKI_MP)
-    if is_ca_ready(client, CHARM_PKI_MP):
+    if is_ca_ready(client, CHARM_PKI_MP, CHARM_PKI_ROLE):
         config = {
             'common_name': cn}
         if ip_sans:
@@ -78,7 +79,7 @@ def create_server_certificate(cn, ip_sans=None, alt_names=None):
         if alt_names:
             config['alt_names'] = ','.join(alt_names)
         bundle = client.write(
-            '{}/issue/local'.format(CHARM_PKI_MP),
+            '{}/issue/{}'.format(CHARM_PKI_MP, CHARM_PKI_ROLE),
             **config)['data']
     else:
         raise vault.VaultNotReady("CA not ready")
@@ -164,13 +165,12 @@ def upload_signed_csr(pem, allowed_domains, allow_subdomains=True,
     if not max_ttl:
         max_ttl = '87598h'
     client.write(
-        '{}/roles/local'.format(CHARM_PKI_MP),
+        '{}/roles/{}'.format(CHARM_PKI_MP, CHARM_PKI_ROLE),
         allowed_domains=allowed_domains,
         allow_subdomains=allow_subdomains,
         enforce_hostnames=enforce_hostnames,
         allow_any_name=allow_any_name,
         max_ttl=max_ttl)
-
 
 def sort_sans(sans):
     """Split SANS into IP sans and name SANS
