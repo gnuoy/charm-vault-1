@@ -1,3 +1,10 @@
+import datetime
+import json
+from cryptography import x509
+from cryptography.hazmat.backends import default_backend
+from cryptography.x509.extensions import ExtensionNotFound
+from cryptography.x509.oid import NameOID, ExtensionOID
+
 import charmhelpers.contrib.network.ip as ch_ip
 import charmhelpers.core.hookenv as hookenv
 
@@ -56,7 +63,7 @@ def get_ca():
     return hookenv.leader_get('root-ca')
 
 
-def get_server_certificate(cn, ip_sans=None, alt_names=None, reissue=False):
+def get_server_certificate(cn, ip_sans=None, alt_names=None):
     """Create a certificate and key for the given cn inc sans if requested
 
     :param cn: Common name to use for certifcate
@@ -184,3 +191,183 @@ def sort_sans(sans):
     ip_sans = {s for s in sans if ch_ip.is_ip(s)}
     alt_names = set(sans).difference(ip_sans)
     return sorted(list(ip_sans)), sorted(list(alt_names))
+
+
+def get_vault_units():
+    """Return all vault units related to this one
+
+    :returns: List of vault units
+    :rtype: []
+    """
+    peer_rid = hookenv.relation_ids('cluster')[0]
+    vault_units = [hookenv.local_unit()]
+    vault_units.extend(hookenv.related_units(relid=peer_rid))
+    return vault_units
+
+
+def get_matching_cert_from_relation(unit_name, cn, ip_sans, alt_names):
+    """Scan vault units relation data for a cert that matches
+
+       Scan the relation data that each vault unit has sent to the clients
+       to find a cert that matchs the cn and sans. If one exists return it.
+       If mutliple are found then return the one with the lastest valid_to
+       date
+
+    :param unit_name: Return the unit_name to look for serts for.
+    :type unit_name: string
+    :param cn: Common name to use for certifcate
+    :type cn: string
+    :param ip_sans: List of IP address to create san records for
+    :type ip_sans: [str1,...]
+    :param alt_names: List of names to create san records for
+    :type alt_names: [str1,...]
+    :returns: Cert and key if found
+    :rtype: {}
+    """
+    vault_units = get_vault_units()
+    rid = hookenv.relation_id('certificates', unit_name)
+    match = []
+    for vunit in vault_units:
+        sent_data = hookenv.relation_get(unit=vunit, rid=rid)
+        name = unit_name.replace('/', '_')
+        cert_name = '{}.server.cert'.format(name)
+        cert_key = '{}.server.key'.format(name)
+        candidate_cert = sent_data.get(cert_name)
+        if candidate_cert and cert_matches_request(candidate_cert, cn,
+                                                   ip_sans, alt_names):
+            match.append({
+                'certificate': sent_data.get(cert_name),
+                'private_key': sent_data.get(cert_key)})
+        batch_request_raw = sent_data.get('processed_requests')
+        if batch_request_raw:
+            batch_request = json.loads(batch_request_raw)
+            for sent_cn in batch_request.keys():
+                if sent_cn == cn:
+                    candidate_cert = batch_request[cn]['cert']
+                    candidate_key = batch_request[cn]['key']
+                    if cert_matches_request(candidate_cert, cn, ip_sans,
+                                            alt_names):
+                        match.append({
+                            'certificate': candidate_cert,
+                            'private_key': candidate_key})
+    return select_newest(match)
+
+
+def cert_matches_request(cert_pem, cn, ip_sans, alt_names):
+    """Test if the cert matches the supplied attributes
+
+       If the cn is duplicated in either the cert or the supplied alt_names
+       it is removed before performing the check.
+
+    :param cert_pem: Certificate in pem format to check
+    :type cert_pem: string
+    :param cn: Common name to use for certifcate
+    :type cn: string
+    :param ip_sans: List of IP address to create san records for
+    :type ip_sans: [str1,...]
+    :param alt_names: List of names to create san records for
+    :type alt_names: [str1,...]
+    :returns: Whether cert matches criteria
+    :rtype: bool
+    """
+    cert_data = certificate_information(cert_pem)
+    if cn == cert_data['cn']:
+        try:
+            cert_data['alt_names'].remove(cn)
+        except ValueError:
+            pass
+        try:
+            alt_names.remove(cn)
+        except ValueError:
+            pass
+    else:
+        return False
+    if sorted(cert_data['alt_names']) == sorted(alt_names) and \
+            sorted(cert_data['ip_sans']) == sorted(ip_sans):
+        return True
+    else:
+        return False
+
+
+def certificate_information(cert_pem):
+    """Extract cn, sans and expiration info from certificate
+
+    :param cert_pem: Certificate in pem format to check
+    :type cert_pem: string
+    :returns: Certificate information in a dictionary
+    :rtype: {}
+    """
+    cert = x509.load_pem_x509_certificate(cert_pem.encode(), default_backend())
+    bundle = {
+        'cn': cert.subject.get_attributes_for_oid(
+            NameOID.COMMON_NAME)[0].value,
+        'not_valid_after': cert.not_valid_after}
+    try:
+        sans = cert.extensions.get_extension_for_oid(
+            ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
+        alt_names = sans.value.get_values_for_type(x509.DNSName)
+        ip_sans = sans.value.get_values_for_type(x509.IPAddress)
+        ip_sans = [str(ip) for ip in ip_sans]
+    except ExtensionNotFound:
+        alt_names = ip_sans = []
+    bundle['ip_sans'] = ip_sans
+    bundle['alt_names'] = alt_names
+    return bundle
+
+
+def select_newest(certs):
+    """Iterate over the certificate bundle and return the one with the latest
+       not_valid_after date
+
+    :returns: Certificate bundle
+    :rtype: {}
+    """
+    latest = datetime.datetime.utcfromtimestamp(0)
+    candidate = None
+    for bundle in certs:
+        cert = x509.load_pem_x509_certificate(
+            bundle['certificate'].encode(),
+            default_backend())
+        not_valid_after = cert.not_valid_after
+        if not_valid_after > latest:
+            latest = not_valid_after
+            candidate = bundle
+    return candidate
+
+
+def process_cert_request(cn, sans, unit_name, reissue_requested):
+    """Return a certificate and key matching the requeest
+
+    Return a certificate and key matching the request. This may be an existing
+    certificate and key if one exists and reissue_requested is False.
+
+    :param cn: Common name to use for certifcate
+    :type cn: string
+    :param sans: List of SANS
+    :type sans: list
+    :param unit_name: Return the unit_name to look for serts for.
+    :type unit_name: string
+    :returns: Cert and key
+    :rtype: {}
+    """
+    bundle = {}
+    ip_sans, alt_names = sort_sans(sans)
+    if not reissue_requested:
+        bundle = get_matching_cert_from_relation(
+            unit_name,
+            cn,
+            list(ip_sans),
+            list(alt_names))
+        hookenv.log(
+            "Found existing cert for {}, reusing".format(cn),
+            level=hookenv.DEBUG)
+    if not bundle:
+        hookenv.log(
+            "Requesting new cert for {}".format(cn),
+            level=hookenv.DEBUG)
+        # Create the server certificate based on the info in request.
+        bundle = get_server_certificate(
+            cn,
+            ip_sans=ip_sans,
+            alt_names=alt_names)
+    return bundle

@@ -622,20 +622,23 @@ def create_server_cert():
     reissue_requested = is_flag_set('certificates.reissue.requested')
     tls = endpoint_from_flag('certificates.available')
     server_requests = tls.get_server_requests()
-    # Iterate over all items in the map.
     for unit_name, request in server_requests.items():
+        log(
+            'Processing certificate requests from {}'.format(unit_name),
+            level=DEBUG)
+        # Process request for a single certificate
         cn = request.get('common_name')
         sans = request.get('sans')
-        # Process request for a single certificate
         if cn and sans:
-            ip_sans, alt_names = vault_pki.sort_sans(request.get('sans'))
-            # Create the server certificate based on the info in request.
+            log(
+                'Processing single certificate requests for {}'.format(cn),
+                level=DEBUG)
             try:
-                bundle = vault_pki.get_server_certificate(
+                bundle = vault_pki.process_cert_request(
                     cn,
-                    ip_sans=ip_sans,
-                    alt_names=alt_names,
-                    reissue=reissue_requested)
+                    sans,
+                    unit_name,
+                    reissue_requested)
             except vault.VaultNotReady:
                 # Cannot continue if vault is not ready
                 return
@@ -647,22 +650,25 @@ def create_server_cert():
         # Process request for a batch of certificates
         cert_requests = request.get('cert_requests')
         if cert_requests:
+            log(
+                'Processing batch of requests from {}'.format(unit_name),
+                level=DEBUG)
             for cn, crequest in cert_requests.items():
-                ip_sans, alt_names = vault_pki.sort_sans(crequest.get('sans'))
+                log('Processing requests for {}'.format(cn), level=DEBUG)
                 try:
-                    bundle = vault_pki.get_server_certificate(
+                    bundle = vault_pki.process_cert_request(
                         cn,
-                        ip_sans=list(ip_sans),
-                        alt_names=list(alt_names),
-                        reissue=reissue_requested)
-                    tls.add_server_cert(
+                        crequest.get('sans'),
                         unit_name,
-                        cn,
-                        bundle['certificate'],
-                        bundle['private_key'])
+                        reissue_requested)
                 except vault.VaultNotReady:
                     # Cannot continue if vault is not ready
                     return
+                tls.add_server_cert(
+                    unit_name,
+                    cn,
+                    bundle['certificate'],
+                    bundle['private_key'])
             tls.set_server_multicerts(unit_name)
         tls.set_ca(vault_pki.get_ca())
         chain = vault_pki.get_chain()

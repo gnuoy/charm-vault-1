@@ -69,6 +69,7 @@ class TestHandlers(unit_tests.test_utils.CharmTestCase):
             'is_flag_set',
             'set_flag',
             'clear_flag',
+            'endpoint_from_flag',
         ]
         self.patch_all()
 
@@ -586,9 +587,9 @@ class TestHandlers(unit_tests.test_utils.CharmTestCase):
 
     @mock.patch.object(handlers.vault_pki, 'get_ca')
     @mock.patch.object(handlers.vault_pki, 'get_chain')
-    @mock.patch.object(handlers.vault_pki, 'create_server_certificate')
+    @mock.patch.object(handlers.vault_pki, 'process_cert_request')
     @mock.patch.object(handlers, 'vault')
-    def test_create_server_cert(self, _vault, create_server_certificate,
+    def test_create_server_cert(self, _vault, process_cert_request,
                                 get_chain, get_ca):
         tls_mock = mock.MagicMock()
         tls_mock.get_server_requests.return_value = {
@@ -597,16 +598,19 @@ class TestHandlers(unit_tests.test_utils.CharmTestCase):
                 'sans': ['10.0.0.10', 'admin.public.openstack.local']}
         }
         _vault.vault_ready_for_clients.return_value = True
-        create_server_certificate.return_value = {
+        process_cert_request.return_value = {
             'certificate': 'CERT',
             'private_key': 'KEY'}
         get_ca.return_value = 'CA'
         get_chain.return_value = 'CHAIN'
-        handlers.create_server_cert(tls_mock)
-        create_server_certificate.assert_called_once_with(
+        self.endpoint_from_flag.return_value = tls_mock
+        self.is_flag_set.return_value = False
+        handlers.create_server_cert()
+        process_cert_request.assert_called_once_with(
             'public.openstack.local',
-            alt_names=['admin.public.openstack.local'],
-            ip_sans=['10.0.0.10'])
+            ['10.0.0.10', 'admin.public.openstack.local'],
+            'keystone_0',
+            False)
         tls_mock.set_server_cert.assert_called_once_with(
             'keystone_0',
             'CERT',
@@ -616,12 +620,12 @@ class TestHandlers(unit_tests.test_utils.CharmTestCase):
 
     @mock.patch.object(handlers.vault_pki, 'get_ca')
     @mock.patch.object(handlers.vault_pki, 'get_chain')
-    @mock.patch.object(handlers.vault_pki, 'create_server_certificate')
+    @mock.patch.object(handlers.vault_pki, 'process_cert_request')
     @mock.patch.object(handlers, 'vault')
-    def test_create_server_cert_batch(self, _vault, create_server_certificate,
+    def test_create_server_cert_batch(self, _vault, process_cert_request,
                                       get_chain, get_ca):
 
-        def _certs(cn, ip_sans, alt_names):
+        def _certs(cn, ip_sans, alt_names, reissue_requested=False):
             data = {
                 'admin.openstack.local': {
                     'certificate': 'ADMINCERT',
@@ -645,22 +649,25 @@ class TestHandlers(unit_tests.test_utils.CharmTestCase):
                     'internal.openstack.local': {
                         'sans': ['10.20.0.10']}}}}
         _vault.vault_ready_for_clients.return_value = True
-        create_server_certificate.side_effect = _certs
+        process_cert_request.side_effect = _certs
         get_ca.return_value = 'CA'
         get_chain.return_value = 'CHAIN'
         create_calls = [
             mock.call(
                 'admin.openstack.local',
-                alt_names=['flump.openstack.local'],
-                ip_sans=['10.0.0.10']),
+                ['10.0.0.10', 'flump.openstack.local'],
+                'keystone_0',
+                False),
             mock.call(
                 'public.openstack.local',
-                alt_names=['unit_name.openstack.local'],
-                ip_sans=['10.10.0.10']),
+                ['10.10.0.10', 'unit_name.openstack.local'],
+                'keystone_0',
+                False),
             mock.call(
                 'internal.openstack.local',
-                alt_names=[],
-                ip_sans=['10.20.0.10'])]
+                ['10.20.0.10'],
+                'keystone_0',
+                False)]
         add_server_calls = [
             mock.call(
                 'keystone_0',
@@ -673,8 +680,11 @@ class TestHandlers(unit_tests.test_utils.CharmTestCase):
                 'INTCERT',
                 'INTKEY')
         ]
-        handlers.create_server_cert(tls_mock)
-        create_server_certificate.assert_has_calls(
+        self.endpoint_from_flag.return_value = tls_mock
+        self.is_flag_set.return_value = False
+        handlers.create_server_cert()
+        print(process_cert_request.call_args_list)
+        process_cert_request.assert_has_calls(
             create_calls,
             any_order=True)
         tls_mock.set_server_cert.assert_called_once_with(
@@ -691,5 +701,6 @@ class TestHandlers(unit_tests.test_utils.CharmTestCase):
     def test_create_server_cert_vault_not_ready(self, _vault):
         _vault.vault_ready_for_clients.return_value = False
         tls_mock = mock.MagicMock()
-        handlers.create_server_cert(tls_mock)
+        self.endpoint_from_flag.return_value = tls_mock
+        handlers.create_server_cert()
         self.assertFalse(tls_mock.get_server_requests.called)

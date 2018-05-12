@@ -10,3 +10,4 @@ psycopg2
 git+https://github.com/openstack/charms.openstack#egg=charms.openstack
 tenacity
 pbr
+cryptography
